@@ -1,0 +1,241 @@
+"""Evaluate held-out projects using paired, bug-level comparisons."""
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.special import expit
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import roc_auc_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+from model import Ranker
+
+
+def load(manifest, cache):
+    rows = pd.read_json(manifest, lines=True, dtype={"id": str, "bug": str, "project": str})
+    rows = rows.reset_index(drop=True)
+    data = np.load(cache, allow_pickle=False)
+    if rows.id.duplicated().any() or list(rows.id) != list(data["ids"]):
+        raise ValueError("unique manifest IDs must exactly match cache order")
+    if rows.groupby("project").split.nunique().max() != 1 or set(rows.split) != {"train", "cal", "test"}:
+        raise ValueError("use disjoint train, calibration, and test projects")
+    if not rows.correct.isin([0, 1]).all() or not rows.passed.isin([0, 1]).all() or (rows.correct > rows.passed).any():
+        raise ValueError("need adjudicated binary labels; correct implies passed")
+    if rows.duplicated(["project", "bug", "patch"]).any():
+        raise ValueError("deduplicate identical patches within each bug first")
+    numeric = rows[["seconds", "n_tests", "gen_score"]].to_numpy(float)
+    if not np.isfinite(numeric).all() or (rows.seconds <= 0).any() or (rows.n_tests < 0).any():
+        raise ValueError("invalid runtimes, test counts or generation scores")
+    x, h, overhead = data["diff"], data["prefix"], data["seconds"]
+    if x.ndim != 2 or h.ndim != 3 or h.shape[1] != 10 or any(len(a) != len(rows) for a in (x,h,overhead)):
+        raise ValueError("invalid cache dimensions")
+    if any(not np.isfinite(a).all() for a in (x,h,overhead)) or (overhead < 0).any():
+        raise ValueError("invalid cache values")
+    rows["group"] = list(map(json.dumps, zip(rows.project, rows.bug)))
+    return rows, x, h, overhead
+
+
+def families(rows, x, h, args):
+    train = rows.split.eq("train").to_numpy()
+    if args.train_on == "plausible":
+        train &= rows.passed.to_numpy(bool)
+    cal = rows.split.eq("cal").to_numpy()
+    out = {}
+    for mode in ["diff", "probe", "last", "mean", "fusion", "no_rank"]:
+        heads = []
+        for seed in args.seeds:
+            model = Ranker("fusion" if mode == "no_rank" else mode, seed,
+                           rank_weight=0 if mode == "no_rank" else 1)
+            model.fit(x[train], h[train], rows.correct.to_numpy(int)[train], rows.group.to_numpy()[train])
+            heads.append(model.logits(x, h))
+        raw = np.array(heads)
+        mean = raw.mean(0)
+        scaler = LogisticRegression(C=1.0).fit(mean[cal,None], rows.correct[cal])
+        if scaler.coef_[0,0] <= 0:
+            raise ValueError(f"{mode}: calibration slope nonpositive; inspect development data")
+        probs = expit(scaler.intercept_[0] + scaler.coef_[0,0]*raw)
+        out[mode] = (scaler.predict_proba(mean[:,None])[:,1], probs.std(0), expit(mean), raw)
+    return out
+
+
+def rank_rows(g, score, name):
+    order = np.argsort(-score[g.index], kind="stable")
+    correct = g.correct.to_numpy()[order]
+    hit = np.flatnonzero(correct)
+    return dict(group=g.group.iloc[0], project=g.project.iloc[0], method=name,
+                mrr=1/(hit[0]+1) if len(hit) else 0., top1=int(correct[0]),
+                top5=int(correct[:5].any()), repairable=int(correct.any()))
+
+
+def cost_features(rows):
+    return np.log1p(np.column_stack([rows.patch.str.len(), rows.original.str.len(),
+                                     (rows.patch.str.len()-rows.original.str.len()).abs(), rows.n_tests]))
+
+
+def replay(g, policy, budget, rule, args):
+    p = g.p.to_numpy()
+    u = g.u.to_numpy()
+    cost = g.cost.to_numpy()
+    actual = g.seconds.to_numpy()
+    passed = g.passed.to_numpy(bool)
+    correct = g.correct.to_numpy(bool)
+    # Charge the complete feature pass once, including unselected candidates.
+    needs_score = policy not in {"exhaustive", "cost", "generation"} or rule == "best"
+    elapsed = g.overhead.sum() if needs_score else 0.
+    left = np.ones(len(g), bool)
+    chosen = []
+    scale = 1.
+    while left.any() and elapsed < budget:
+        predicted = np.maximum(cost * scale, 1e-6)
+        priority = p.copy()
+        if policy == "exhaustive":
+            priority = -np.arange(len(g), dtype=float)
+        elif policy == "generation":
+            priority = g.gen_score.to_numpy()
+        elif policy == "cost":
+            priority = 1 / predicted
+        elif policy in {"ratio", "joint", "entropy", "uncalibrated"}:
+            bonus = u if policy == "joint" else 0.
+            if policy == "entropy":
+                t = np.clip(p, 1e-12, 1-1e-12)
+                bonus = -(t*np.log(t)+(1-t)*np.log1p(-t))
+            prior = g.raw_p.to_numpy() if policy == "uncalibrated" else p
+            if policy == "uncalibrated":
+                bonus = g.raw_u.to_numpy()
+            priority = (prior + args.reward*bonus) / predicted
+        elif policy == "no_cost":
+            priority = p + args.reward*u
+        eligible = left.copy()
+        if policy == "fixed":
+            eligible &= p >= args.threshold
+            if len(chosen) >= args.k:
+                break
+        if policy in {"cost", "ratio", "joint", "entropy", "uncalibrated", "no_cost"}:
+            if policy != "no_cost":
+                eligible &= predicted <= budget-elapsed
+        if not eligible.any():
+            break
+        i = int(np.argmax(np.where(eligible, priority, -np.inf)))
+        left[i] = False
+        remaining = budget-elapsed
+        if actual[i] > remaining:
+            return finish(g, chosen, rule, budget, correct, passed, p, i)
+        elapsed += actual[i]
+        chosen.append(i)
+        scale = (1 + actual[chosen].sum()) / (1 + cost[chosen].sum())
+        if rule == "first" and passed[i]:
+            break
+    return finish(g, chosen, rule, min(elapsed,budget), correct, passed, p, None)
+
+
+def finish(g, chosen, rule, seconds, correct, passed, p, interrupted):
+    plausible = [i for i in chosen if passed[i]]
+    selected = None
+    if plausible:
+        selected = plausible[0] if rule in {"first", "all"} else max(plausible, key=lambda i:p[i])
+    return dict(group=g.group.iloc[0], project=g.project.iloc[0], seconds=seconds,
+                attempts=len(chosen)+int(interrupted is not None), completed=len(chosen),
+                repairable=int(correct.any()), retained=int(correct[chosen].any()) if chosen else 0,
+                returned=int(selected is not None), success=int(correct[selected]) if selected is not None else 0,
+                order=json.dumps(g.id.iloc[chosen].tolist()), returned_id=g.id.iloc[selected] if selected is not None else "",
+                interrupted_id=g.id.iloc[interrupted] if interrupted is not None else "")
+
+
+def paired(wide, a, b, rng):
+    delta = (wide[a]-wide[b]).to_numpy()
+    boot = [rng.choice(delta, len(delta)).mean() for _ in range(2000)]
+    return dict(a=a,b=b,n=len(delta),difference=delta.mean(),lo=np.quantile(boot,.025),
+                hi=np.quantile(boot,.975),better=int((delta>0).sum()),worse=int((delta<0).sum()))
+
+
+def assess(rows,x,h,overhead,args):
+    out = args.out
+    out.mkdir(parents=True,exist_ok=False)
+    scores = families(rows,x,h,args)
+    test = rows.loc[rows.split == "test"].copy()
+    train = rows.loc[rows.split == "train"]
+    costs = make_pipeline(StandardScaler(), Ridge(alpha=1)).fit(cost_features(train), np.log(train.seconds))
+    test["cost"] = np.exp(costs.predict(cost_features(test)))
+    idx = test.index
+    p,u,raw,heads = scores["fusion"]
+    test = test.assign(p=p[idx],u=u[idx],raw_p=raw[idx],raw_u=expit(heads[:,idx]).std(0),overhead=overhead[idx])
+    test[["id","project","bug","p","u","raw_p","cost","seconds","overhead"]].to_csv(out/"predictions.csv",index=False)
+    ranks, quality, reliability = [], [], []
+    rank_scores = {k:v[0] for k,v in scores.items()}
+    rank_scores["generation"] = rows.gen_score.to_numpy()
+    for j, seed in enumerate(args.seeds):
+        rank_scores[f"fusion_seed_{seed}"] = heads[j]
+    for name,score in rank_scores.items():
+        ranks.extend(rank_rows(g,score,name) for _,g in test.groupby("group"))
+        plausible = test[test.passed == 1]
+        auc = roc_auc_score(plausible.correct,score[plausible.index]) if plausible.correct.nunique()==2 else None
+        quality.append(dict(method=name,plausible_auc=auc))
+    for name,prob in [("raw",raw[idx]),("calibrated",p[idx])]:
+        bins = np.minimum((prob*10).astype(int),9)
+        for j in np.unique(bins):
+            mask = bins == j
+            reliability.append(dict(model=name,bin=j,count=mask.sum(),confidence=prob[mask].mean(),
+                                    observed=test.correct.to_numpy()[mask].mean()))
+        quality.append(dict(method=name,brier=np.mean((prob-test.correct.to_numpy())**2)))
+    pd.DataFrame(quality).to_csv(out/"quality.csv",index=False)
+    pd.DataFrame(reliability).to_csv(out/"reliability.csv",index=False)
+    rank = pd.DataFrame(ranks)
+    rank.to_csv(out/"rank_by_bug.csv",index=False)
+    rank.groupby("method")[["mrr","top1","top5"]].mean().to_csv(out/"rank_all_bugs.csv")
+    decisions = []
+    policies = ["generation","fixed","score","cost","ratio","joint","entropy","no_cost","uncalibrated"]
+    for _,g in test.groupby("group"):
+        decisions.append(dict(policy="exhaustive",budget=np.inf,rule="all",
+                              **replay(g,"exhaustive",np.inf,"all",args)))
+        for policy in policies:
+            for budget in args.budgets:
+                for rule in ("first","best"):
+                    decisions.append(dict(policy=policy,budget=budget,rule=rule,
+                                          **replay(g,policy,budget,rule,args)))
+    logs=pd.DataFrame(decisions)
+    logs.to_csv(out/"schedule_by_bug.csv",index=False)
+    summary=logs.groupby(["policy","budget","rule"]).agg(
+        bugs=("group","size"), repaired=("success","sum"), returned=("returned","sum"),
+        retained=("retained","sum"), repairable=("repairable","sum"), attempts=("attempts","sum"),
+        seconds=("seconds","sum"))
+    summary["success_rate"]=summary.repaired/summary.bugs
+    summary["return_precision"]=summary.repaired/summary.returned.replace(0,np.nan)
+    summary["return_coverage"]=summary.returned/summary.bugs
+    summary["wrong_returns"]=summary.returned-summary.repaired
+    summary["retention"]=summary.retained/summary.repairable.replace(0,np.nan)
+    summary.to_csv(out/"schedule.csv")
+    rng=np.random.default_rng(813)
+    cis=[]
+    for metric in ["mrr","top1","top5"]:
+        wide=rank.pivot(index="group",columns="method",values=metric)
+        for baseline in ["probe","last","diff","mean","no_rank","generation"]:
+            cis.append(dict(metric=metric,**paired(wide,"fusion",baseline,rng)))
+    for (budget,rule),g in logs[logs.policy!="exhaustive"].groupby(["budget","rule"]):
+        for metric in ["success","retained"]:
+            if metric=="retained":
+                g_eval=g[g.repairable==1]
+            else:
+                g_eval=g
+            if len(g_eval):
+                wide=g_eval.pivot(index="group",columns="policy",values=metric)
+                cis.append(dict(metric=metric,budget=budget,rule=rule,**paired(wide,"joint","ratio",rng)))
+    pd.DataFrame(cis).to_csv(out/"paired.csv",index=False)
+    (out/"settings.json").write_text(json.dumps({**vars(args),"out":str(out),
+        "cost_mae_seconds":float((test.cost-test.seconds).abs().mean())},default=str,indent=2))
+
+
+if __name__=="__main__":
+    ap=argparse.ArgumentParser()
+    ap.add_argument("manifest"); ap.add_argument("cache"); ap.add_argument("out",type=Path)
+    ap.add_argument("--seeds",nargs="+",type=int,default=[11,23,37,53,71])
+    ap.add_argument("--budgets",nargs="+",type=float,required=True)
+    ap.add_argument("--train-on",choices=["all","plausible"],default="all")
+    ap.add_argument("--reward",type=float,required=True); ap.add_argument("--threshold",type=float,required=True)
+    ap.add_argument("--k",type=int,required=True)
+    args=ap.parse_args()
+    if min(args.budgets)<=0 or len(set(args.seeds))<2 or args.k<1 or not 0<=args.threshold<=1 or args.reward<0:
+        ap.error("invalid budgets, ensemble, threshold, reward or K")
+    assess(*load(args.manifest,args.cache),args)

@@ -1,0 +1,35 @@
+name: Build revised thesis draft
+on:
+  push:
+    branches: [thesis-evidence]
+    paths: ['毕业论文/两组新增对照实验.md', 'experiments/update_draft.py', '.github/workflows/thesis-draft.yml']
+permissions:
+  contents: write
+jobs:
+  revise:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install document tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libreoffice-writer fonts-noto-cjk poppler-utils
+          python -m pip install python-docx
+      - name: Insert study sections and render the review copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          draft='毕业论文/毕业论文初稿_语义表征引导的补丁验证.docx'
+          python experiments/update_draft.py "$draft" '毕业论文/两组新增对照实验.md' "$RUNNER_TEMP/revised.docx"
+          cp "$RUNNER_TEMP/revised.docx" "$draft"
+          mkdir -p "$RUNNER_TEMP/render"
+          libreoffice --headless --convert-to pdf --outdir "$RUNNER_TEMP/render" "$draft"
+          pdf="$RUNNER_TEMP/render/$(basename "${draft%.docx}").pdf"
+          pdftotext -layout "$pdf" "$RUNNER_TEMP/review.txt"
+          tr -d '[:space:]' < "$RUNNER_TEMP/review.txt" > "$RUNNER_TEMP/check.txt"
+          grep -q '多前缀信号与修复前后差异的独立贡献' "$RUNNER_TEMP/check.txt"
+          grep -q '相同时间预算下不确定性奖励的独立贡献' "$RUNNER_TEMP/check.txt"
+          cp "$pdf" "${draft%.docx}.pdf"
+          git add "$draft" "${draft%.docx}.pdf"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Integrate controlled comparisons into thesis chapters and refresh PDF'
+          git push origin HEAD:thesis-evidence
