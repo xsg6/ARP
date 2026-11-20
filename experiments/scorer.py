@@ -7,7 +7,7 @@ from sklearn.metrics import roc_auc_score
 
 
 class Scorer(nn.Module):
-    def __init__(self, mode, edit_dim, blocks, attention_width=64):
+    def __init__(self, mode, edit_dim, blocks, attention_width=64, hidden_width=512, dropout=.2):
         super().__init__()
         self.mode=mode
         self.blocks=blocks
@@ -16,7 +16,7 @@ class Scorer(nn.Module):
         self.attention=nn.ModuleDict({str(i):nn.Sequential(nn.Linear(blocks[i],attention_width),
                     nn.Tanh(),nn.Linear(attention_width,1,bias=False)) for i in self.indices})
         dim=(edit_dim if self.use_edit else 0)+sum(blocks[i] for i in self.indices)
-        self.head=nn.Sequential(nn.Linear(dim,512),nn.GELU(),nn.Dropout(.2),nn.Linear(512,1))
+        self.head=nn.Sequential(nn.Linear(dim,hidden_width),nn.GELU(),nn.Dropout(dropout),nn.Linear(hidden_width,1))
 
     def forward(self,x,h):
         parts=[x] if self.use_edit else []
@@ -38,8 +38,8 @@ def train_head(mode, seed, rows, x, h, train, cal, dims, args):
     torch.manual_seed(seed)
     rng=np.random.default_rng(seed)
     device=args.device
-    net=Scorer(mode,x.shape[1],dims).to(device)
-    opt=torch.optim.AdamW(net.parameters(),lr=.001,weight_decay=.0001)
+    net=Scorer(mode,x.shape[1],dims,args.attention_width,args.hidden_width,args.dropout).to(device)
+    opt=torch.optim.AdamW(net.parameters(),lr=args.learning_rate,weight_decay=args.weight_decay)
     y=rows.correct.to_numpy(int)
     ids=np.flatnonzero(train)
     counts=np.bincount(y[ids],minlength=2)
@@ -54,7 +54,7 @@ def train_head(mode, seed, rows, x, h, train, cal, dims, args):
     def predict(indices):
         net.eval()
         with torch.inference_mode():
-            return np.concatenate([score(indices[i:i+64]).cpu().numpy() for i in range(0,len(indices),64)])
+            return np.concatenate([score(indices[i:i+args.batch_size]).cpu().numpy() for i in range(0,len(indices),args.batch_size)])
     best_auc=-1.; stale=0; best=None
     for epoch in range(args.epochs):
         # Previous-epoch scores are used for hard negative mining within each bug.
@@ -71,15 +71,15 @@ def train_head(mode, seed, rows, x, h, train, cal, dims, args):
                 pairs.extend((pos,n) for n in np.r_[hard,random_neg])
         pair_array=np.asarray(pairs,dtype=int).reshape(-1,2)
         order=rng.permutation(ids); net.train()
-        for offset in range(0,len(order),64):
-            batch=order[offset:offset+64]
+        for offset in range(0,len(order),args.batch_size):
+            batch=order[offset:offset+args.batch_size]
             labels=torch.as_tensor(y[batch],device=device,dtype=torch.float32)
             w=torch.as_tensor(weights[y[batch]],device=device,dtype=torch.float32)
             loss=nn.functional.binary_cross_entropy_with_logits(score(batch),labels,weight=w)
             if len(pair_array) and mode!="no_rank":
                 subset=pair_array[rng.integers(len(pair_array),size=len(batch))]
                 plus,minus=score(subset.ravel()).sigmoid().reshape(-1,2).T
-                loss=loss+.5*(.2-plus+minus).relu().mean()
+                loss=loss+args.rank_weight*(args.rank_margin-plus+minus).relu().mean()
             opt.zero_grad(); loss.backward(); opt.step()
         valid=np.flatnonzero(cal & rows.passed.to_numpy(bool))
         auc=roc_auc_score(y[valid],predict(valid))
@@ -87,7 +87,7 @@ def train_head(mode, seed, rows, x, h, train, cal, dims, args):
             best_auc=auc; stale=0; best=copy.deepcopy(net.state_dict())
         else:
             stale+=1
-            if stale>=10:
+            if stale>=args.patience:
                 break
     net.load_state_dict(best)
     return predict(np.arange(len(rows)))

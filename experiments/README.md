@@ -2,6 +2,32 @@
 
 这是基于本仓库阶段计划新写的参考实现。原实验代码、模型修订号、395 个缺陷的逐候选数据及历史日志未随稿件提交。这里的默认超参数、提示词、分类器和成本模型属于本实现的选择。历史统计不作为程序输入或期望输出。新实验需要保存真实候选、标签、配置和运行结果后才能引用。
 
+## 使用论文配置
+
+在仓库根目录执行以下命令。已具备标注清单和特征缓存时，可直接从 evaluate 开始。正式生成与提取前，lock 将配置里的模型分支解析为精确提交哈希，保留生成的 JSON 即可重用同一版本。
+
+```bash
+cd experiments
+python -m pip install -r requirements.txt
+python run.py lock run_config.json
+python run.py --config run_config.json generate bugs.jsonl candidates.jsonl
+python run.py --config run_config.json validate candidates.jsonl validation.jsonl
+# 将通过测试的候选结合开发者修复和人工复核结果标注，生成 adjudicated.jsonl。
+python run.py --config run_config.json encode adjudicated.jsonl cache.npz
+python run.py --config run_config.json evaluate adjudicated.jsonl cache.npz results --roster bugs.jsonl
+python run.py --config run_config.json report results
+```
+
+将输入和输出路径放在阶段名称后，再写可选参数。命令行可覆盖配置数值。例如在已有缓存的 CPU 机器上评估，可在 evaluate 命令末尾加 `--device cpu`。配置键和运行结果的 settings.json 可逐项核对。
+
+| 参数来源 | 配置或实现 |
+|---|---|
+| 原小论文的生成和评分 | 每缺陷采样 50 次，温度 0.8、top-p 0.95、最多 512 个新 token。固定十个相对位置，按解码器分别注意力汇聚；评分头宽度 512、dropout 0.2、批量 64、AdamW 学习率 0.001、权重衰减 0.0001、排序间隔 0.2、排序损失系数 0.5、最多 100 轮、早停耐心 10。 |
+| 本实现选定 | 注意力宽度 64，五个初始化种子为 11、23、37、53、71。RQ5 注入原型维度 128。模型锁定的是本次复现采用的版本。 |
+| 第二个创新点的预实验设置 | 每缺陷 30、60、120 秒，分歧奖励系数 0.25。联合策略按“校准正确概率加上加权模型分歧，再除以预计耗时”排序。固定预算基线启用 select_fixed 后，由开发集选择 K 和阈值，目标为保留至少 95% 的可修复缺陷。正式测试前冻结预算和奖励系数。 |
+
+两个研究点均在一次 evaluate 中运行；rank_all_bugs.csv 和 paired.csv 对照差异、末位置、多位置和完整融合，schedule.csv 与 schedule_by_bug.csv 给出相同预算下 ratio 和 joint 的最终修复率及逐缺陷结果。基线代码参考入口见 [UniXcoder 官方实现](https://github.com/microsoft/CodeBERT/tree/master/UniXcoder) 和 [ODS 作者实现](https://github.com/ASSERT-KTH/ODSExperiment)。仅多位置基线是固定末层的受控比较，原 AutoProbe 还包含跨层选择。
+
 ## 从缺陷到候选
 
 在隔离的实验机安装 Defects4J、项目所需 JDK、Python 3.10+ 和 requirements.txt。每个缺陷提供一行 JSON，字段为 project、bug、split、file、start_line、end_line、original、n_tests，可提供 prompt、encoding。位置为 buggy checkout 中闭区间的行号，original 为完整原片段，patch 表示该处的替换文本。本生成/验证入口支持单个连续修改区域；历史多文件候选可在原验证程序测量后走导入路径。固定 Defects4J 版本与硬件，保存命令输出。文件标识和人工标注不从测试项目训练得到。

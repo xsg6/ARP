@@ -374,14 +374,27 @@ if __name__=="__main__":
     ap.add_argument("--seeds",nargs="+",type=int,default=[11,23,37,53,71])
     ap.add_argument("--budgets",nargs="+",type=float,required=True)
     ap.add_argument("--train-on",choices=["all","plausible"],default="plausible")
-    ap.add_argument("--select-fixed",action="store_true",help="select K and threshold on cal to retain at least 95%")
+    ap.add_argument("--select-fixed",action="store_true",help="select K and threshold on cal to retain at least 95%%")
     ap.add_argument("--skip-auc-ci",action="store_true",help="omit expensive cluster bootstrap for development runs")
     ap.add_argument("--backend",choices=["paper","linear"],default="paper")
     ap.add_argument("--device",default="cpu")
     ap.add_argument("--epochs",type=int,default=100)
     ap.add_argument("--reward",type=float,required=True); ap.add_argument("--threshold",type=float,required=True)
     ap.add_argument("--k",type=int,required=True)
+    ap.add_argument("--attention-width", type=int, default=64)
+    ap.add_argument("--hidden-width", type=int, default=512)
+    ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument("--patience", type=int, default=10)
+    ap.add_argument("--dropout", type=float, default=.2)
+    ap.add_argument("--learning-rate", type=float, default=.001)
+    ap.add_argument("--weight-decay", type=float, default=.0001)
+    ap.add_argument("--rank-margin", type=float, default=.2)
+    ap.add_argument("--rank-weight", type=float, default=.5)
     args=ap.parse_args()
+    if (min(args.attention_width,args.hidden_width,args.batch_size,args.patience,args.epochs)<1
+            or not 0 <= args.dropout < 1 or args.learning_rate <= 0
+            or min(args.rank_weight,args.rank_margin,args.weight_decay)<0):
+        ap.error("invalid scoring model or optimizer parameter")
     if min(args.budgets)<=0 or len(set(args.seeds))<2 or args.k<1 or not 0<=args.threshold<=1 or args.reward<0:
         ap.error("invalid budgets, ensemble, threshold, reward or K")
     assess(*load(args.manifest,args.cache),args)

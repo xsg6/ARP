@@ -30,8 +30,10 @@ def main(paper=False):
         np.savez(cache,ids=[r["id"] for r in rows],diff=x,prefix=h,seconds=np.full(len(x),.01),widths=[2,3],tiny=np.array(h)[:,:,:2])
         roster=tmp/"roster.jsonl"
         roster.write_text("\n".join(json.dumps(dict(project="test",split="test",bug=str(i))) for i in range(10)))
-        subprocess.run([sys.executable,str(Path(__file__).with_name("evaluate.py")),str(manifest),str(cache),str(out),
-                        "--skip-auc-ci","--select-fixed","--backend","paper" if paper else "linear","--epochs","2","--train-on","all","--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+        subprocess.run([sys.executable,str(Path(__file__).with_name("run.py")),"evaluate",str(manifest),str(cache),str(out),
+                        "--device","cpu","--hidden-width","32","--attention-width","8","--skip-auc-ci","--select-fixed","--backend","paper" if paper else "linear","--epochs","2","--train-on","all","--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+        settings=json.loads((out/"settings.json").read_text())
+        assert settings["attention_width"]==8 and settings["hidden_width"]==32 and settings["budgets"]==[2,5]
         from report import report
         report(out)
         assert (out/"budget_curve.pdf").stat().st_size > 0
