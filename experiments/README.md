@@ -18,7 +18,7 @@ python prepare.py encode adjudicated.jsonl cache.npz --encoder-revision "$ENCODE
 
 ## 原始候选导入
 
-已有候选可直接整理为 adjudicated.jsonl，每项须含 id（全局唯一字符串）、project、bug、split、original、patch、gen_score（越大越优）、n_tests、seconds、passed、correct。每个项目只允许分配到 train、cal、test 之一。cal 来自开发项目，测试项目独立。对生成零候选的缺陷，请单独核对缺陷清单并计入全缺陷指标，当前脚本只对清单中至少有一条记录的缺陷求值。测试集和候选池须与论文逐项对齐后才可引用结果。
+已有候选可直接整理为 adjudicated.jsonl，每项须含 id（全局唯一字符串）、project、bug、split、original、patch、gen_score（越大越优）、n_tests、seconds、passed、correct。每个项目只允许分配到 train、cal、test 之一。cal 来自开发项目，测试项目独立。正式评估请传入 --roster bugs.jsonl，对零候选缺陷按 MRR、Top-k、最终成功均为零计入分母；缺省仅评估清单中有候选的缺陷。测试集和候选池须与论文逐项对齐后才可引用结果。
 
 缓存 NPZ 需要 ids、diff（N×D）、prefix（N×10×H）、seconds（每个候选的表征提取秒数）。默认 diff 为 UniXcoder 原、改、改减原向量拼接；prefix 为两个冻结 Qwen 模型在 10% 至 100% 相对位置的末层隐藏状态。在因果模型的一次前向计算中读取这些位置。保存真实修订哈希。短补丁可能重复取到同一位置。
 
@@ -27,12 +27,13 @@ python prepare.py encode adjudicated.jsonl cache.npz --encoder-revision "$ENCODE
 ```bash
 OPENBLAS_NUM_THREADS=1 python evaluate.py adjudicated.jsonl cache.npz results --budgets 30 60 120 --reward 0.25 --threshold 0.5 --k 10
 python evaluate.py adjudicated.jsonl cache.npz results_plausible --budgets 30 60 120 --reward 0.25 --threshold 0.5 --k 10 --train-on plausible
+python report.py results
 python check_pipeline.py
 ```
 
 命令参数为示例，在开发集确定预算、奖励权重、K 和阈值后冻结。默认五个按缺陷自助抽样的轻量模型。每个种子结果及 ensemble 均输出。仅差异、仅多位置、末位置融合、平均汇聚、注意力融合、移除排序损失共用训练划分。仅多位置为受 AutoProbe 启发的固定层基线；原方法包含跨层选择。真实数据上应额外记录 GPU 型号、模型初始化和各阶段墙钟时间。运行另一项目划分时用新 manifest 和独立输出目录，禁止复用测试项目拟合的模型。
 
-rank_by_bug.csv、rank_all_bugs.csv 和 quality.csv 给出排名、Top-k 及通过测试子集的 AUC。reliability.csv 和 quality.csv 给出校准分箱和 Brier。predictions.csv 可核查耗时预测、模型分歧和逐候选误差。schedule_by_bug.csv 保存执行顺序、终止时未完成的候选、最终返回及真实标签评估结果；schedule.csv 汇总全缺陷成功率、返回覆盖率、条件正确率、保留率、错误返回和总时间。paired.csv 报告以缺陷为单位的配对 bootstrap 差值、区间、改善和退化数量。逐项目分析可按两个 by_bug 表的 project 分组。settings.json 记录运行参数和耗时预测 MAE。
+rank_by_bug.csv、rank_all_bugs.csv 和 quality.csv 给出排名、Top-k 及通过测试子集的 AUC。reliability.csv 和 quality.csv 给出校准分箱和 Brier。predictions.csv 可核查耗时预测、模型分歧和逐候选误差。schedule_by_bug.csv 保存执行顺序、终止时未完成的候选、最终返回及真实标签评估结果；schedule.csv 汇总全缺陷成功率、返回覆盖率、条件正确率、保留率、错误返回和总时间。paired.csv 报告以缺陷为单位的配对 bootstrap 差值、区间、改善和退化数量。逐项目分析可按两个 by_bug 表的 project 分组。settings.json 记录运行参数、输入校验和与耗时预测 MAE。report.py 生成逐项目汇总、发生修复得失的具体缺陷清单、预算曲线和可靠性曲线。
 
 成本模型仅用训练项目已知的补丁规模和测试数量拟合。每次选择仅用预估成本和此前已完成的开销，实际耗时用于回放执行和扣除预算。预算不足以完成一次验证时无法取得测试结果。联合策略与概率/成本策略共用其余决策规则。不确定性奖励来自校准后的模型分歧。完成一次测试后更新同一缺陷的成本倍率，并未用事后正确标签更新未执行候选。回放时间由提取时间和实际编译测试时间构成，未计模型加载、训练、生成、轻量评分或调度端到端耗时。对所有使用语义打分的策略统一收取完整特征开销；best 返回规则也需要评分。对速度作最终结论需另做实机计时。
 

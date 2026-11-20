@@ -28,10 +28,15 @@ def main():
         tmp=Path(tmp); manifest=tmp/"fixture.jsonl"; cache=tmp/"fixture.npz"; out=tmp/"out"
         manifest.write_text("\n".join(json.dumps(r) for r in rows))
         np.savez(cache,ids=[r["id"] for r in rows],diff=x,prefix=h,seconds=np.full(len(x),.01))
+        roster=tmp/"roster.jsonl"
+        roster.write_text("\n".join(json.dumps(dict(project="test",split="test",bug=str(i))) for i in range(10)))
         subprocess.run([sys.executable,str(Path(__file__).with_name("evaluate.py")),str(manifest),str(cache),str(out),
-                        "--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+                        "--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+        from report import report
+        report(out)
+        assert (out/"budget_curve.pdf").stat().st_size > 0
         summary=pd.read_csv(out/"schedule.csv")
-        assert (summary.bugs==9).all() and (summary.repairable==8).all()
+        assert (summary.bugs==10).all() and (summary.repairable==8).all()
         assert ((summary.repaired<=summary.retained)&(summary.repaired<=summary.returned)).all()
         paired=pd.read_csv(out/"paired.csv")
         assert {"ratio","probe","last","diff"}.issubset(paired.b.unique())

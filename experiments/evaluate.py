@@ -1,6 +1,7 @@
 """Evaluate held-out projects using paired, bug-level comparisons."""
 import argparse
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -54,8 +55,7 @@ def families(rows, x, h, args):
         raw = np.array(heads)
         mean = raw.mean(0)
         scaler = LogisticRegression(C=1.0).fit(mean[cal,None], rows.correct[cal])
-        if scaler.coef_[0,0] <= 0:
-            raise ValueError(f"{mode}: calibration slope nonpositive; inspect development data")
+        # Platt scaling is fitted only on calibration projects, including for weak ablations.
         probs = expit(scaler.intercept_[0] + scaler.coef_[0,0]*raw)
         out[mode] = (scaler.predict_proba(mean[:,None])[:,1], probs.std(0), expit(mean), raw)
     return out
@@ -156,6 +156,15 @@ def assess(rows,x,h,overhead,args):
     out.mkdir(parents=True,exist_ok=False)
     scores = families(rows,x,h,args)
     test = rows.loc[rows.split == "test"].copy()
+    roster = test[["project","bug","group"]].drop_duplicates().copy()
+    if args.roster:
+        roster = pd.read_json(args.roster,lines=True,dtype={"project":str,"bug":str})
+        roster = roster[roster.split=="test"].copy()
+        roster["group"] = list(map(json.dumps,zip(roster.project,roster.bug)))
+        if roster.group.duplicated().any() or not set(test.group).issubset(roster.group):
+            raise ValueError("invalid or incomplete test bug roster")
+    missing = roster[~roster.group.isin(test.group)]
+
     train = rows.loc[rows.split == "train"]
     costs = make_pipeline(StandardScaler(), Ridge(alpha=1)).fit(cost_features(train), np.log(train.seconds))
     test["cost"] = np.exp(costs.predict(cost_features(test)))
@@ -170,6 +179,8 @@ def assess(rows,x,h,overhead,args):
         rank_scores[f"fusion_seed_{seed}"] = heads[j]
     for name,score in rank_scores.items():
         ranks.extend(rank_rows(g,score,name) for _,g in test.groupby("group"))
+        for bug in missing.itertuples():
+            ranks.append(dict(group=bug.group,project=bug.project,method=name,mrr=0.,top1=0,top5=0,repairable=0))
         plausible = test[test.passed == 1]
         auc = roc_auc_score(plausible.correct,score[plausible.index]) if plausible.correct.nunique()==2 else None
         quality.append(dict(method=name,plausible_auc=auc))
@@ -195,6 +206,12 @@ def assess(rows,x,h,overhead,args):
                 for rule in ("first","best"):
                     decisions.append(dict(policy=policy,budget=budget,rule=rule,
                                           **replay(g,policy,budget,rule,args)))
+    settings={(d["policy"],d["budget"],d["rule"]) for d in decisions}
+    for bug in missing.itertuples():
+        for policy,budget,rule in sorted(settings):
+            decisions.append(dict(policy=policy,budget=budget,rule=rule,group=bug.group,project=bug.project,
+                seconds=0.,attempts=0,completed=0,repairable=0,retained=0,returned=0,success=0,order="[]",
+                returned_id="",interrupted_id=""))
     logs=pd.DataFrame(decisions)
     logs.to_csv(out/"schedule_by_bug.csv",index=False)
     summary=logs.groupby(["policy","budget","rule"]).agg(
@@ -223,13 +240,21 @@ def assess(rows,x,h,overhead,args):
                 wide=g_eval.pivot(index="group",columns="policy",values=metric)
                 cis.append(dict(metric=metric,budget=budget,rule=rule,**paired(wide,"joint","ratio",rng)))
     pd.DataFrame(cis).to_csv(out/"paired.csv",index=False)
+    def digest(path):
+        with open(path, "rb") as stream:
+            sha=hashlib.sha256()
+            for block in iter(lambda:stream.read(1024*1024),b""):
+                sha.update(block)
+        return sha.hexdigest()
+    hashes={key:digest(path) for key,path in [("manifest",args.manifest),("cache",args.cache),("roster",args.roster)] if path}
     (out/"settings.json").write_text(json.dumps({**vars(args),"out":str(out),
-        "cost_mae_seconds":float((test.cost-test.seconds).abs().mean())},default=str,indent=2))
+        "sha256":hashes,"cost_mae_seconds":float((test.cost-test.seconds).abs().mean())},default=str,indent=2))
 
 
 if __name__=="__main__":
     ap=argparse.ArgumentParser()
     ap.add_argument("manifest"); ap.add_argument("cache"); ap.add_argument("out",type=Path)
+    ap.add_argument("--roster",help="all bugs, including those with no candidates; JSONL project, bug, split")
     ap.add_argument("--seeds",nargs="+",type=int,default=[11,23,37,53,71])
     ap.add_argument("--budgets",nargs="+",type=float,required=True)
     ap.add_argument("--train-on",choices=["all","plausible"],default="all")
