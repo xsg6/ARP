@@ -17,3 +17,4 @@ jobs:
       - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: python -m pip install numpy pandas scipy scikit-learn matplotlib 'transformers>=4.46,<5'
       - run: OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 python experiments/check_pipeline.py --paper
+      - run: OMP_NUM_THREADS=1 python experiments/check_models.py

@@ -31,7 +31,7 @@ def main(paper=False):
         roster=tmp/"roster.jsonl"
         roster.write_text("\n".join(json.dumps(dict(project="test",split="test",bug=str(i))) for i in range(10)))
         subprocess.run([sys.executable,str(Path(__file__).with_name("evaluate.py")),str(manifest),str(cache),str(out),
-                        "--backend","paper" if paper else "linear","--epochs","2","--train-on","all","--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+                        "--skip-auc-ci","--select-fixed","--backend","paper" if paper else "linear","--epochs","2","--train-on","all","--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
         from report import report
         report(out)
         assert (out/"budget_curve.pdf").stat().st_size > 0

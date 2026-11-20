@@ -164,10 +164,65 @@ def paired(wide, a, b, rng):
                 hi=np.quantile(boot,.975),better=int((delta>0).sum()),worse=int((delta<0).sum()))
 
 
+def select_fixed(rows, scores, overhead):
+    """Choose the cheapest development-set operating point retaining at least 95%."""
+    dev=rows[rows.split=="cal"]
+    ranked=[]
+    for _,g in dev.groupby("group"):
+        order=np.argsort(-scores[g.index],kind="stable")
+        idx=g.index.to_numpy()[order]
+        ranked.append((scores[idx],rows.correct.to_numpy()[idx],rows.seconds.to_numpy()[idx]))
+    denominator=sum(bool(c.any()) for _,c,_ in ranked)
+    if not denominator:
+        raise ValueError("calibration pool has no repairable bugs")
+    thresholds=np.unique(np.r_[0.,np.quantile(scores[dev.index],np.linspace(0,1,21))])
+    best=None
+    for k in range(1,max(len(p) for p,_,_ in ranked)+1):
+        for threshold in thresholds:
+            duration=overhead[dev.index].sum()
+            kept=0
+            for p,c,t in ranked:
+                use=p[:k]>=threshold
+                kept+=bool(c[:k][use].any())
+                duration+=t[:k][use].sum()
+            if kept/denominator>=.95:
+                key=(duration,k,float(threshold))
+                if best is None or key<best:
+                    best=key
+    return best[1:]
+
+
+def auc_intervals(plausible, scores, rng):
+    # For each draw, give all candidates in the same defect equal replicate multiplicity.
+    groups, inverse=np.unique(plausible.group.to_numpy(),return_inverse=True)
+    labels=plausible.correct.to_numpy()
+    if len(np.unique(labels))<2:
+        return []
+    draws={m:[] for m in scores}
+    predictions={m:v[plausible.index] for m,v in scores.items()}
+    for _ in range(1000):
+        weights=np.bincount(rng.integers(len(groups),size=len(groups)),minlength=len(groups))[inverse]
+        if len(np.unique(labels[weights>0]))<2:
+            continue
+        for m,values in predictions.items():
+            draws[m].append(roc_auc_score(labels,values,sample_weight=weights))
+    output=[]
+    for m,estimates in draws.items():
+        if estimates:
+            lo,hi=np.quantile(estimates,[.025,.975])
+            output.append(dict(method=m,lo=lo,hi=hi,valid_draws=len(estimates)))
+    return output
+
+
 def assess(rows,x,h,overhead,args):
     out = args.out
     out.mkdir(parents=True,exist_ok=False)
+    import time
+    start=time.perf_counter()
     scores = families(rows,x,h,args)
+    fit_and_score_seconds=time.perf_counter()-start
+    if args.select_fixed:
+        args.k,args.threshold=select_fixed(rows,scores["fusion"][0],overhead)
     test = rows.loc[rows.split == "test"].copy()
     roster = test[["project","bug","group"]].drop_duplicates().copy()
     if args.roster:
@@ -208,6 +263,8 @@ def assess(rows,x,h,overhead,args):
             reliability.append(dict(model=name,bin=j,count=mask.sum(),confidence=prob[mask].mean(),
                                     observed=test.correct.to_numpy()[mask].mean()))
         quality.append(dict(method=name,brier=np.mean((prob-test.correct.to_numpy())**2)))
+    if not args.skip_auc_ci:
+        pd.DataFrame(auc_intervals(test[test.passed==1],{k:v[0] for k,v in scores.items()},np.random.default_rng(731))).to_csv(out/"auc_ci.csv",index=False)
     pd.DataFrame(quality).to_csv(out/"quality.csv",index=False)
     pd.DataFrame(reliability).to_csv(out/"reliability.csv",index=False)
     rank = pd.DataFrame(ranks)
@@ -248,7 +305,12 @@ def assess(rows,x,h,overhead,args):
                 cost=(es[g.index].sum() if use_edit else 0)+sum(ds[m,g.index].sum() for m in models)
             legacy.append(dict(group=g.group.iloc[0],method=method,retained=int(pick.correct.any()),
                                repairable=int(g.correct.any()),count=len(pick),seconds=pick.seconds.sum()+cost))
-    pd.DataFrame(legacy).to_csv(out/"fixed_k_cost_by_bug.csv",index=False)
+    legacy=pd.DataFrame(legacy)
+    legacy.to_csv(out/"fixed_k_cost_by_bug.csv",index=False)
+    table=legacy.groupby("method")[["retained","repairable","count","seconds"]].sum()
+    table["retention"]=table.retained/table.repairable.replace(0,np.nan)
+    table["time_saving"]=1-table.seconds/table.loc["exhaustive","seconds"]
+    table.to_csv(out/"fixed_k_cost.csv")
     rank.groupby("method")[["mrr","top1","top5"]].mean().to_csv(out/"rank_all_bugs.csv")
     decisions = []
     policies = ["generation","fixed","score","cost","ratio","joint","entropy","no_cost","uncalibrated"]
@@ -302,7 +364,7 @@ def assess(rows,x,h,overhead,args):
         return sha.hexdigest()
     hashes={key:digest(path) for key,path in [("manifest",args.manifest),("cache",args.cache),("roster",args.roster)] if path}
     (out/"settings.json").write_text(json.dumps({**vars(args),"out":str(out),
-        "sha256":hashes,"cost_mae_seconds":float((test.cost-test.seconds).abs().mean())},default=str,indent=2))
+        "sha256":hashes,"fit_and_score_seconds":fit_and_score_seconds,"cost_mae_seconds":float((test.cost-test.seconds).abs().mean())},default=str,indent=2))
 
 
 if __name__=="__main__":
@@ -312,6 +374,8 @@ if __name__=="__main__":
     ap.add_argument("--seeds",nargs="+",type=int,default=[11,23,37,53,71])
     ap.add_argument("--budgets",nargs="+",type=float,required=True)
     ap.add_argument("--train-on",choices=["all","plausible"],default="plausible")
+    ap.add_argument("--select-fixed",action="store_true",help="select K and threshold on cal to retain at least 95%")
+    ap.add_argument("--skip-auc-ci",action="store_true",help="omit expensive cluster bootstrap for development runs")
     ap.add_argument("--backend",choices=["paper","linear"],default="paper")
     ap.add_argument("--device",default="cpu")
     ap.add_argument("--epochs",type=int,default=100)

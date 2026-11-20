@@ -129,6 +129,15 @@ def extract(args, rows):
         net=cls.from_pretrained(name,revision=rev,torch_dtype="auto").to(device).eval()
         return tok,net
 
+    profiles=[]
+    def profile(model_name,timings,arrays):
+        profiles.append(dict(model=model_name,extraction_seconds=float(np.sum(timings)),
+            feature_bytes=sum(a.nbytes for a in arrays),
+            peak_cuda_bytes=torch.cuda.max_memory_allocated() if str(device).startswith("cuda") else None))
+    def reset_peak():
+        if str(device).startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats()
+    reset_peak()
     diff=[]
     tok,net=load(args.encoder,args.encoder_revision,AutoModel)
     with torch.inference_mode():
@@ -146,10 +155,12 @@ def extract(args, rows):
                 vec.append(net(input_ids=input_ids).last_hidden_state[0].float().mean(0).cpu().numpy())
             diff.append(np.concatenate([vec[0],vec[1],np.abs(vec[1]-vec[0])]))
             sync(); overhead[i]+=time.perf_counter()-start
+    profile(args.encoder,overhead,diff)
     del net
     edit_seconds=overhead.copy()
     blocks=[]; block_seconds=[]; widths=[]
     for name,rev in zip(args.decoders,args.decoder_revisions,strict=True):
+        reset_peak()
         tok,net=load(name,rev,AutoModelForCausalLM)
         previous=overhead.copy()
         block=[]
@@ -166,12 +177,13 @@ def extract(args, rows):
                 positions=len(prefix)+np.maximum(1,np.arange(1,11)*len(patch_ids)//10)-1
                 block.append(state[torch.tensor(positions,device=device)].float().cpu().numpy())
                 sync(); overhead[i]+=time.perf_counter()-start
+        profile(name,overhead-previous,block)
         blocks.append(np.stack(block)); widths.append(blocks[-1].shape[-1]); block_seconds.append(overhead-previous); del net
     with Path(args.out).open("xb") as stream:
         np.savez(stream,ids=ids,diff=np.stack(diff),prefix=np.concatenate(blocks[:2],axis=-1),seconds=edit_seconds+sum(block_seconds[:2]),
                  edit_seconds=edit_seconds,decoder_seconds=np.stack(block_seconds),widths=widths[:2],
                  **({"tiny":blocks[2]} if len(blocks)>2 else {}))
-    Path(str(args.out)+".json").write_text(json.dumps(vars(args),indent=2))
+    Path(str(args.out)+".json").write_text(json.dumps({**vars(args),"profile":profiles},indent=2))
 
 
 if __name__=="__main__":
