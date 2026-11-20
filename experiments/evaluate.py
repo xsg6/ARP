@@ -21,8 +21,9 @@ def load(manifest, cache):
     data = np.load(cache, allow_pickle=False)
     if rows.id.duplicated().any() or list(rows.id) != list(data["ids"]):
         raise ValueError("unique manifest IDs must exactly match cache order")
-    if rows.groupby("project").split.nunique().max() != 1 or set(rows.split) != {"train", "cal", "test"}:
-        raise ValueError("use disjoint train, calibration, and test projects")
+    if (set(rows[rows.split=="test"].project) & set(rows[rows.split!="test"].project) or
+        rows.groupby(["project","bug"]).split.nunique().max()!=1 or set(rows.split)!={"train","cal","test"}):
+        raise ValueError("test projects must be held out and a bug cannot span train/cal")
     if not rows.correct.isin([0, 1]).all() or not rows.passed.isin([0, 1]).all() or (rows.correct > rows.passed).any():
         raise ValueError("need adjudicated binary labels; correct implies passed")
     if rows.duplicated(["project", "bug", "patch"]).any():
@@ -45,9 +46,21 @@ def families(rows, x, h, args):
         train &= rows.passed.to_numpy(bool)
     cal = rows.split.eq("cal").to_numpy()
     out = {}
-    for mode in ["diff", "probe", "last", "mean", "fusion", "no_rank"]:
+    modes=["diff","probe","last","mean","fusion","no_rank"]
+    cache=np.load(args.cache,allow_pickle=False)
+    if args.backend=="paper":
+        from scorer import train_head
+        modes.extend(["small","large","edit_small"])
+        if "tiny" in cache:
+            modes.append("tiny")
+    for mode in modes:
         heads = []
         for seed in args.seeds:
+            if args.backend=="paper":
+                hidden=cache["tiny"] if mode=="tiny" else h
+                dims=[hidden.shape[-1]] if mode=="tiny" else list(cache["widths"].astype(int))
+                heads.append(train_head(mode,seed,rows,x,hidden,train,cal,dims,args))
+                continue
             model = Ranker("fusion" if mode == "no_rank" else mode, seed,
                            rank_weight=0 if mode == "no_rank" else 1)
             model.fit(x[train], h[train], rows.correct.to_numpy(int)[train], rows.group.to_numpy()[train])
@@ -175,6 +188,10 @@ def assess(rows,x,h,overhead,args):
     ranks, quality, reliability = [], [], []
     rank_scores = {k:v[0] for k,v in scores.items()}
     rank_scores["generation"] = rows.gen_score.to_numpy()
+    if "ods_score" in rows:
+        if not np.isfinite(rows.ods_score).all():
+            raise ValueError("incomplete ODS scores")
+        rank_scores["ODS"]=rows.ods_score.to_numpy()
     for j, seed in enumerate(args.seeds):
         rank_scores[f"fusion_seed_{seed}"] = heads[j]
     for name,score in rank_scores.items():
@@ -195,6 +212,43 @@ def assess(rows,x,h,overhead,args):
     pd.DataFrame(reliability).to_csv(out/"reliability.csv",index=False)
     rank = pd.DataFrame(ranks)
     rank.to_csv(out/"rank_by_bug.csv",index=False)
+    repairable=rank[rank.repairable==1].copy()
+    repairable["first_rank"]=1/repairable.mrr
+    repairable.groupby("method").agg(mrr=("mrr","mean"),top1=("top1","mean"),top5=("top5","mean"),
+        median_first_rank=("first_rank","median")).to_csv(out/"rank_repairable.csv")
+    random_rng=np.random.default_rng(101)
+    random_reps=[]
+    for _,g in test.groupby("group"):
+        hits=g.correct.to_numpy(bool)
+        if hits.any():
+            copies=np.array([random_rng.permutation(hits) for _ in range(1000)])
+            first=copies.argmax(axis=1)+1
+            random_reps.append(first)
+    if random_reps:
+        first=np.stack(random_reps)
+        pd.Series(dict(top1=(first==1).mean(),top5=(first<=5).mean(),mrr=(1/first).mean(),
+                       median_first_rank=np.median(first,axis=0).mean())).to_csv(out/"random_repairable.csv")
+    legacy=[]
+    with np.load(args.cache,allow_pickle=False) as cache:
+        ds=cache["decoder_seconds"] if "decoder_seconds" in cache else None
+        es=cache["edit_seconds"] if "edit_seconds" in cache else None
+    for _,g in test.groupby("group"):
+        for method,order in [("exhaustive",list(g.index)),("generation_top20",list(g.nlargest(20,"gen_score").index))]:
+            pick=test.loc[order]
+            legacy.append(dict(group=g.group.iloc[0],method=method,retained=int(pick.correct.any()),
+                               repairable=int(g.correct.any()),count=len(pick),seconds=pick.seconds.sum()))
+        for method in scores:
+            prob=scores[method][0][g.index]
+            order=np.argsort(-prob,kind="stable")[:args.k]
+            pick=g.iloc[order[prob[order]>=args.threshold]]
+            cost=g.overhead.sum()
+            if ds is not None and es is not None:
+                use_edit=method not in {"small","large","tiny","probe"}
+                models={"small":[0],"large":[1],"tiny":[2],"edit_small":[0],"diff":[]}.get(method,[0,1])
+                cost=(es[g.index].sum() if use_edit else 0)+sum(ds[m,g.index].sum() for m in models)
+            legacy.append(dict(group=g.group.iloc[0],method=method,retained=int(pick.correct.any()),
+                               repairable=int(g.correct.any()),count=len(pick),seconds=pick.seconds.sum()+cost))
+    pd.DataFrame(legacy).to_csv(out/"fixed_k_cost_by_bug.csv",index=False)
     rank.groupby("method")[["mrr","top1","top5"]].mean().to_csv(out/"rank_all_bugs.csv")
     decisions = []
     policies = ["generation","fixed","score","cost","ratio","joint","entropy","no_cost","uncalibrated"]
@@ -257,7 +311,10 @@ if __name__=="__main__":
     ap.add_argument("--roster",help="all bugs, including those with no candidates; JSONL project, bug, split")
     ap.add_argument("--seeds",nargs="+",type=int,default=[11,23,37,53,71])
     ap.add_argument("--budgets",nargs="+",type=float,required=True)
-    ap.add_argument("--train-on",choices=["all","plausible"],default="all")
+    ap.add_argument("--train-on",choices=["all","plausible"],default="plausible")
+    ap.add_argument("--backend",choices=["paper","linear"],default="paper")
+    ap.add_argument("--device",default="cpu")
+    ap.add_argument("--epochs",type=int,default=100)
     ap.add_argument("--reward",type=float,required=True); ap.add_argument("--threshold",type=float,required=True)
     ap.add_argument("--k",type=int,required=True)
     args=ap.parse_args()

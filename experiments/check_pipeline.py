@@ -12,7 +12,7 @@ from evaluate import load, replay
 from types import SimpleNamespace
 
 
-def main():
+def main(paper=False):
     rng=np.random.default_rng(42)
     rows=[]; x=[]; h=[]
     for part in ("train","cal","test"):
@@ -27,11 +27,11 @@ def main():
     with TemporaryDirectory() as tmp:
         tmp=Path(tmp); manifest=tmp/"fixture.jsonl"; cache=tmp/"fixture.npz"; out=tmp/"out"
         manifest.write_text("\n".join(json.dumps(r) for r in rows))
-        np.savez(cache,ids=[r["id"] for r in rows],diff=x,prefix=h,seconds=np.full(len(x),.01))
+        np.savez(cache,ids=[r["id"] for r in rows],diff=x,prefix=h,seconds=np.full(len(x),.01),widths=[2,3],tiny=np.array(h)[:,:,:2])
         roster=tmp/"roster.jsonl"
         roster.write_text("\n".join(json.dumps(dict(project="test",split="test",bug=str(i))) for i in range(10)))
         subprocess.run([sys.executable,str(Path(__file__).with_name("evaluate.py")),str(manifest),str(cache),str(out),
-                        "--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
+                        "--backend","paper" if paper else "linear","--epochs","2","--train-on","all","--roster",str(roster),"--seeds","5","7","--budgets","2","5","--k","2","--threshold",".5","--reward",".2"],check=True)
         from report import report
         report(out)
         assert (out/"budget_curve.pdf").stat().st_size > 0
@@ -52,4 +52,4 @@ def main():
 
 
 if __name__=="__main__":
-    main()
+    main("--paper" in sys.argv)
