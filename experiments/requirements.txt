@@ -1,0 +1,8 @@
+numpy>=1.24,<3
+pandas>=2,<4
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+torch>=2.3,<3
+transformers>=4.46,<5
+matplotlib>=3.7,<4
+xgboost>=2,<4

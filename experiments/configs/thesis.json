@@ -1,0 +1,45 @@
+{
+  "generate": {
+    "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "revision": "main",
+    "samples": 50,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "max_tokens": 512,
+    "seed": 11,
+    "device": "cuda"
+  },
+  "validate": {"timeout": 600},
+  "encode": {
+    "encoder": "microsoft/unixcoder-base",
+    "encoder_revision": "main",
+    "decoders": ["Qwen/Qwen2.5-Coder-1.5B", "Qwen/Qwen2.5-Coder-7B", "Qwen/Qwen2.5-Coder-0.5B"],
+    "decoder_revisions": ["main", "main", "main"],
+    "encoder_limit": 512,
+    "context": 4096,
+    "device": "cuda"
+  },
+  "evaluate": {
+    "backend": "paper",
+    "device": "cuda",
+    "train_on": "plausible",
+    "seeds": [11, 23, 37, 53, 71],
+    "epochs": 100,
+    "patience": 10,
+    "batch_size": 64,
+    "hidden_width": 512,
+    "attention_width": 64,
+    "dropout": 0.2,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "rank_margin": 0.2,
+    "rank_weight": 0.5,
+    "budgets": [30, 60, 120],
+    "reward": 0.25,
+    "select_fixed": true,
+    "k": 10,
+    "threshold": 0.5
+  },
+  "injection_train": {"device": "cuda", "epochs": 1, "lr": 0.001, "prototype_dim": 128, "seed": 11},
+  "injection_compare": {"ks": [1, 10]}
+}
