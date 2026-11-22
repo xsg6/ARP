@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 STAGES = {
     "generate": ("prepare.py", "generate"),
+    "labels": ("labels.py",),
     "validate": ("prepare.py", "validate"),
     "encode": ("prepare.py", "encode"),
     "evaluate": ("evaluate.py",),
@@ -60,7 +61,7 @@ def command(config, stage, arguments):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/thesis.json")
-    parser.add_argument("stage", choices=["lock", *STAGES])
+    parser.add_argument("stage", choices=["lock", "study", *STAGES])
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -68,5 +69,10 @@ if __name__ == "__main__":
         if len(args.arguments) != 1:
             parser.error("lock requires an output JSON path")
         lock_models(config, Path(args.arguments[0]))
+    elif args.stage == "study":
+        if len(args.arguments) < 3:
+            parser.error("study requires MANIFEST CACHE RESULT_DIR followed by evaluation options")
+        subprocess.run(command(config, "evaluate", args.arguments), check=True)
+        subprocess.run(command(config, "report", [args.arguments[2]]), check=True)
     else:
         subprocess.run(command(config, args.stage, args.arguments), check=True)

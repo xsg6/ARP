@@ -2,6 +2,26 @@
 
 这是基于本仓库阶段计划新写的参考实现。原实验代码、模型修订号、395 个缺陷的逐候选数据及历史日志未随稿件提交。这里的默认超参数、提示词、分类器和成本模型属于本实现的选择。历史统计不作为程序输入或期望输出。新实验需要保存真实候选、标签、配置和运行结果后才能引用。
 
+## 直接运行两组实验
+
+从仓库根目录进入 experiments 后运行。第一条实验命令只需要 CPU，使用微型合成数据和正式 PyTorch 评分器，结果及输入保存在新目录 demo-run。
+
+```bash
+cd experiments
+python -m pip install -r requirements.txt
+python check_pipeline.py --paper --output demo-run
+```
+
+真实实验从 prepare.py validate 的输出接入。将每个通过原测试的候选的人工判定写入 UTF-8 CSV，表头为 `id,correct`，正确记 1、过拟合记 0；未通过原测试的候选自动记 0。下面三条命令依次合并标签、生成特征、运行两个对照并出图。run_config.json 用下节的 lock 命令生成。已有对应候选的特征缓存时可以跳过 encode。
+
+```bash
+python run.py labels validation.jsonl decisions.csv adjudicated.jsonl
+python run.py --config run_config.json encode adjudicated.jsonl cache.npz
+python run.py --config run_config.json study adjudicated.jsonl cache.npz results --roster bugs.jsonl
+```
+
+标签合并会检查缺失、重复、冲突及多余 ID。study 沿用 evaluate 的参数；请指定新的结果目录。若训练评估成功但绘图中断，可单独运行 `python run.py report results`。第一组对照查看 rank_all_bugs.csv 和 paired.csv；第二组查看 schedule.csv、changed_repairs.csv 和 budget_curve.pdf。演示目录的 SYNTHETIC.txt 标明数据来源。
+
 ## 使用论文配置
 
 在仓库根目录执行以下命令。已具备标注清单和特征缓存时，可直接从 evaluate 开始。正式生成与提取前，lock 将配置里的模型分支解析为精确提交哈希，保留生成的 JSON 即可重用同一版本。
