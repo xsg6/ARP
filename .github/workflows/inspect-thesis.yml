@@ -1,0 +1,27 @@
+name: Inspect thesis paragraphs
+on:
+  push:
+    branches: [thesis-evidence]
+    paths: ['.github/workflows/inspect-thesis.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect current draft
+        shell: python
+        run: |
+          import glob,zipfile
+          from xml.etree import ElementTree as E
+          root=E.fromstring(zipfile.ZipFile(glob.glob('毕业论文/毕业论文初稿*.docx')[0]).read('word/document.xml'))
+          ns={'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+          for i,p in enumerate(root.findall('w:body/w:p',ns)):
+              text=''.join(x.text or '' for x in p.findall('.//w:t',ns))
+              style=p.find('w:pPr/w:pStyle',ns)
+              sid=style.get('{'+ns['w']+'}val','') if style is not None else ''
+              if text.strip() in ['摘　要','摘 要','摘要','Abstract','ABSTRACT','参考文献'] or (len(text)<85 and (sid.startswith('Heading') or '章' in text[:6] or text[:1].isdigit())) or text.startswith('[17]'):
+                  print('STRUCT',i,sid, text[:75])
+              elif any(k in text for k in ['创新','本文的贡献','AutoProbe','本文提出','首次','future work','In this','This thesis']):
+                  print('MATCH',i,sid,len(text),[k for k in ['创新','本文的贡献','AutoProbe','本文提出','首次','future work','In this','This thesis'] if k in text])
