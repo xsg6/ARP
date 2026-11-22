@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install typesetting tools
         run: |
-          python -m pip install lxml pymupdf
+          python -m pip install lxml pymupdf pillow
           if ! command -v libreoffice || ! fc-list :lang=zh | grep -q .; then
             sudo apt-get -o Acquire::Retries=2 update -qq
             sudo apt-get install --no-install-recommends -y -qq libreoffice-writer fonts-noto-cjk
@@ -22,88 +22,23 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-          from copy import deepcopy
-          import re, zipfile, subprocess,tempfile
+          import re,zipfile,subprocess,tempfile,base64
           from lxml import etree as E
           import fitz
           D=next(Path('毕业论文').glob('毕业论文初稿*.docx'))
           ns={'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
           W='{'+ns['w']+'}'
-          with zipfile.ZipFile(D) as z:
-              parts={n:z.read(n) for n in z.namelist()}
+          with zipfile.ZipFile(D) as z:parts={n:z.read(n) for n in z.namelist()}
           root=E.fromstring(parts['word/document.xml'])
-          body=root.find('w:body',ns)
-          ps=body.findall('w:p',ns)
+          ps=root.find('w:body',ns).findall('w:p',ns)
           def txt(p):return ''.join(p.xpath('.//w:t/text()',namespaces=ns))
-          assert txt(ps[217]).startswith('第一章') and txt(ps[618])=='参考文献'
-          def write(p,s):
-              r=p.find('w:r',ns)
-              tmpl=deepcopy(r.find('w:rPr',ns)) if r is not None and r.find('w:rPr',ns) is not None else None
-              for r in p.findall('w:r',ns):p.remove(r)
-              for bit in re.split(r'(\[\d+(?:[,–-]\d+)*\])',s):
-                  if not bit:continue
-                  r=E.SubElement(p,W+'r')
-                  rp=deepcopy(tmpl) if tmpl is not None else E.Element(W+'rPr')
-                  if bit.startswith('[') and len(bit)<12:E.SubElement(rp,W+'vertAlign').set(W+'val','superscript')
-                  if len(rp):r.append(rp)
-                  t=E.SubElement(r,W+'t');t.text=bit;t.set('{http://www.w3.org/XML/1998/namespace}space','preserve')
-          changes={
-          68:'自动程序修复可以为同一缺陷生成多个补丁。编译和测试的成本限制了能够验证的候选数量，而通过已有测试的补丁仍可能在未覆盖的输入上产生错误。本文研究在给定候选池和验证预算时，如何优先执行更可能正确修复缺陷的补丁。',
-          69:'第一项工作考察两类信息在同一缺陷内排序时的互补性。编码器记录修改前后的代码及其差异，冻结的解码器提供候选在十个相对前缀位置的隐藏状态；评分模型通过分类目标与缺陷内排序目标联合训练。前期研究在六个 Defects4J 项目上进行跨项目评估。在候选池含有正确解的测试缺陷上，将末位置融合改为多前缀融合后，平均倒数排名由 0.52 提高到 0.61。该比较支持进一步考察前缀位置的作用，修复差异在多位置基线上带来的独立增益仍待检验。',
-          70:'第二项工作考察相同时间预算下模型分歧对验证顺序的作用。以校准得分与预计验证耗时之比为对照，在相同候选池和返回规则下加入分歧奖励，以全部测试缺陷中最终返回正确补丁的比例衡量收益。本文给出调度实现和配对评估方案，真实候选上的增益仍待测定。前期固定预算实验报告的 96.2% 为可修复缺陷上的正确候选保留率。',
-          73:'Automated program repair can generate several candidate patches for a single defect. Compilation and testing consume time, and a patch that passes the available tests may still fail on inputs that the tests do not cover. This thesis studies how to allocate a limited validation budget among candidates generated for the same defect.',
-          74:'The first study examines whether two sources of evidence provide complementary information for ranking. An encoder represents the buggy and patched contexts and their difference. Two frozen decoders provide hidden states at ten relative positions in each candidate. A lightweight scoring model combines these signals and is trained both to classify candidates and to rank them within each defect. In the earlier cross-project evaluation on six Defects4J projects, replacing final-position fusion with multi-prefix fusion increased mean reciprocal rank from 0.52 to 0.61 among test defects whose candidate pools contained a correct patch. This comparison motivates a controlled evaluation of edit information against a multi-position baseline. The incremental benefit of adding edit information to that baseline has yet to be measured.',
-          75:'The second study asks whether disagreement among scoring models improves the choice of candidates under a fixed time budget. The baseline ranks candidates by calibrated probability of correctness divided by predicted validation time. The proposed policy adds a disagreement bonus before dividing by the same cost estimate. Both policies use the same candidates, time limit and return rule. The primary outcome is the fraction of all test defects for which the returned patch is correct. Paired comparisons identify defects gained and lost at each budget. The implementation and evaluation protocol are available; the comparison on adjudicated repair candidates remains open. The previously reported retention of 96.2 percent concerns repairable candidate pools under a fixed selection policy and measures whether a correct candidate remained available for validation.',
-          236:'Vu 等的 AutoProbe 从代码模型的不同层与词元位置提取隐藏状态，通过注意力选择有助于质量判断的表示[18]。Ribeiro 等进一步在同一编程任务的正确与错误解之间识别内部信号，并在执行测试前据此选择候选解[19]。由此可见，生成代码的多个位置本身就可能提供正确性信息。',
-          237:'程序修复还提供了缺陷原代码和局部编辑位置。同一缺陷的两个候选可能仅相差一个边界条件，单看完成后的代码，两者都可能具有较高的生成概率。这里要检验的是：在已利用多位置状态的条件下，显式引入修改前后差异能否进一步改善这两个候选的相对次序。',
-          241:'Casino 依据测试反馈在补丁搜索空间开展探索，采用 Thompson 采样选择后续候选[20]。Gresino 引入程序执行时观测到的分支命中信息来调整搜索方向[21]。本文关注另一类决策信息：执行前多个评分模型对某个候选的分歧，以及编译和测试该候选的预计耗时。实验固定返回规则，考察这两种信息是否有助于在预算内返回正确补丁。',
-          244:'第一项研究工作针对同一缺陷内候选补丁的执行前排序。以单独使用修复差异、单独使用多位置状态、末位置融合及多前缀融合构成对照。在相同解码器、训练目标和候选池下逐缺陷比较，分别估计修复差异与前缀采样带来的增益。固定末层的多位置基线用于控制成本，与 AutoProbe 的跨层选择存在实现差异。',
-          245:'第二项研究工作考察分歧奖励在成本感知验证中的增量作用。对给定缺陷，以正确概率与预计耗时之比作为基线；实验组加入由轻量评分模型集成产生的分歧奖励。两组共享预算与返回规则，记录时间耗尽前实际完成的验证以及最终返回的补丁。该对照允许收益为零，也能揭示因优先验证高分歧候选而错失正确补丁的情形。',
-          511:'前期对照中，末位置融合与多前缀融合的平均倒数排名分别为 0.52 和 0.61，分母均为候选池包含正确补丁的测试缺陷。该差值描述位置采样改变后的观察结果。为区分修复差异的作用，还需比较完整融合与固定末层多位置基线；后者借鉴 AutoProbe 的注意力汇聚思路[18]。',
-          513:'历史排名使用可修复缺陷作为分母。新增对照同时报告该口径和全部测试缺陷口径，后一口径对无正确候选的缺陷记零。判别实验仅在通过原始测试的候选中计算 ROC-AUC。各方法在相同缺陷上配对重采样，报告差值及其 95% 区间。四方对照仍待在原始候选池上运行。',
-          597:'在相同时间预算下，主要对照共享校准概率、成本估计和在线耗时修正规则。实验组仅在优先级的分子中增加加权模型分歧。两组逐缺陷配对，分开统计新增修复、失去修复与共同修复；逐一核对结果发生改变的缺陷，判断变化来自验证次序、预算耗尽还是返回规则。',
-          607:'前期结果支持在同一缺陷内比较不同前缀位置所携带的信息。要进一步确认修复差异与多位置状态能否互补，仍需完成完整融合与固定层多位置基线的配对比较。对于时间预算调度，本文已经实现模型分歧与预计成本的联合选择。当前能够确定的是比较方法与评价口径；是否增加最终正确返回的缺陷数，取决于真实候选上的逐缺陷结果。'}
-          for i,s in changes.items():write(ps[i],s)
-          refs=[
-          'VU T T, BUI T D, NGUYEN T T, et al. Model-agnostic quality assessment for LLM-generated code via dynamic internal representation selection[J]. Journal of Systems and Software, 2026, 237: 112852.',
-          'RIBEIRO F, SPIESS C, DEVANBU P, et al. On LLMs’ internal representation of code correctness[C]//Proceedings of the 48th International Conference on Software Engineering. 2026.',
-          'KIM Y, HAN S, KHAMIT A Y, et al. Automated program repair from fuzzing perspective[C]//Proceedings of the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis. 2023. DOI: 10.1145/3597926.3598101.',
-          'KIM Y, PARK Y, HAN S, et al. Enhancing the efficiency of automated program repair via greybox analysis[C]//Proceedings of the 39th IEEE/ACM International Conference on Automated Software Engineering. 2024. DOI: 10.1145/3691620.3695602.']
-          refparas={i:ps[618+i] for i in range(1,18)}
-          for i,s in enumerate(refs,18):
-              p=deepcopy(ps[635]);ps[636].addprevious(p);write(p,f'[{i}] '+s);refparas[i]=p
-          # Renumber numeric citation runs in order of first appearance.
-          pattern=r'\[(\d+(?:\s*[,，–—-]\s*\d+)*)\]'
-          def nums(x):
-              out=[]
-              for s in re.split('[,，]',x):
-                  ends=re.split('[–—-]',s)
-                  out.extend(range(int(ends[0]),int(ends[-1])+1))
-              return out
-          runs=[]
-          for p in ps[217:618]:
-              for node in p.xpath('.//w:t',namespaces=ns):
-                  for m in re.finditer(pattern,node.text or ''):
-                      if not all(1<=n<=21 for n in nums(m[1])):continue
-                      runs.append((node,m[0],nums(m[1])))
-          order=list(dict.fromkeys(n for _,_,a in runs for n in a))
-          order+= [i for i in refparas if i not in order]
-          mapping={old:i for i,old in enumerate(order,1)}
-          def renumber(m):
-              a=nums(m[1])
-              if not all(n in mapping for n in a):return m[0]
-              b=sorted(mapping[n] for n in a)
-              return '['+','.join(map(str,b))+']'
-          # Include table text, notes and appendices outside the bibliography.
-          for node in root.xpath('//w:t',namespaces=ns):
-              if any(p in refparas.values() for p in node.iterancestors(W+'p')):continue
-              node.text=re.sub(pattern,renumber,node.text or '')
-          for i in order:
-              p=refparas[i];nodes=p.xpath('.//w:t',namespaces=ns)
-              nodes[0].text=re.sub(r'^\[\d+\]',f'[{mapping[i]}]',nodes[0].text)
-              if i>=18:
-                  for v in p.xpath('.//w:vertAlign',namespaces=ns):v.getparent().remove(v)
-              ps[636].addprevious(p)
+          def append(p,s):p.xpath('./w:r/w:t',namespaces=ns)[-1].text+=s
+          append(ps[75]," Reporting both outcomes makes it possible to identify cases where testing a disputed candidate consumes time needed for a correct alternative.")
+          assert len(txt(ps[73]).split()+txt(ps[74]).split()+txt(ps[75]).split())>=300
+          append(ps[68],"因此，评价同时关注排序改善的来源，以及耗时相近时验证次序改变所带来的修复得失。")
+          assert txt(ps[368]).startswith('3.6') and txt(ps[446]).startswith('4.6')
+          append(ps[369],"在这一设置下，注意力权重反映各采样位置对评分的相对贡献。检验修复差异的作用应固定采样位置和训练标签，比较加入差异表征前后首个正确候选的名次。")
+          append(ps[447],"若高分歧主要来自评分器对陌生项目的共同失准，给予这类候选更高优先级可能耗尽验证时间。因而需要同时记录原策略能修复而联合策略未修复的缺陷，并检查最后一个完成和第一个未完成的候选。")
           def save():
               parts['word/document.xml']=E.tostring(root,encoding='UTF-8',xml_declaration=True,standalone=True)
               with zipfile.ZipFile(D,'w',zipfile.ZIP_DEFLATED) as z:
@@ -128,17 +63,33 @@ jobs:
               changed+=new!=ts[-1].text;ts[-1].text=new
           if changed:save();render()
           pdf=fitz.open(D.with_suffix('.pdf'));pages=[compact(p.get_text()) for p in pdf]
-          assert all(len(p)>12 for p in pages)
-          assert all(any(k in p for p in pages) for k in ['AutoProbe','Casino','Gresino','0.61','96.2%'])
-          print('QA pages',len(pdf),'entries_updated',changed,'unmatched_entries',unmatched,'references',len(refparas),'formulas',len(root.xpath('//*[local-name()="oMath"]')))
-          
-          # Inspect geometry of all pages without exporting manuscript text to CI logs.
-          for i,page in enumerate(pdf):
-              for line in (line for blk in page.get_text("dict")["blocks"] if "lines" in blk for line in blk["lines"]):
-                  if not any(span["text"].strip() for span in line["spans"]):continue
-                  x0,y0,x1,y1=line["bbox"]
-                  assert x0>=-2 and y0>=-2 and x1<=page.rect.width+2 and y1<=page.rect.height+2,(i,"bounds")
-          print("English abstract words", sum(len(changes[i].split()) for i in (73,74,75)))
+          for i,p in enumerate(ps[79:217],79):
+              ts=p.xpath('.//w:t',namespaces=ns)
+              if len(ts)<2 or not (ts[-1].text or '').isdigit():continue
+              key=compact(''.join(t.text or '' for t in ts[:-1]))
+              assert key in pages[start+int(ts[-1].text)-1],('page reference',i)
+          assert not unmatched
+          abstract_pages=[]
+          for beg,end in [(68,71),(73,76)]:
+              page=next(j for j,p in enumerate(pages) if compact(txt(ps[beg]))[:25] in p)
+              assert compact(txt(ps[end]))[-15:] in pages[page],('abstract overflow',beg)
+              abstract_pages.append(page)
+          print('FINAL_QA',len(pdf),len(txt(ps[73]).split()+txt(ps[74]).split()+txt(ps[75]).split()),abstract_pages,changed)
+          for sec in root.xpath('//w:sectPr',namespaces=ns):
+              m=sec.find(W+'pgMar')
+              if m is not None:print('MARGINS',[m.get(W+k) for k in ('left','right','top','bottom')])
+          # Render only anonymised block geometry for layout inspection.
+          from PIL import Image,ImageDraw
+          marked=abstract_pages+[start,len(pdf)-7]
+          sheet=Image.new('RGB',(200*len(marked),284),'white')
+          draw=ImageDraw.Draw(sheet)
+          for col,j in enumerate(marked):
+              page=pdf[j];scale=194/page.rect.width
+              for x0,y0,x1,y1,*_ in page.get_text('blocks'):
+                  draw.rectangle((col*200+x0*scale, y0*scale, col*200+x1*scale,y1*scale),fill='#b8c3cd')
+          import io
+          buf=io.BytesIO();sheet.save(buf,format='PNG')
+          print('GEOMETRY',base64.b64encode(buf.getvalue()).decode())
       - name: Save revised Word and PDF
         run: |
           git add -- 毕业论文/*.docx 毕业论文/*.pdf
