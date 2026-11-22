@@ -21,7 +21,5 @@ jobs:
               text=''.join(x.text or '' for x in p.findall('.//w:t',ns))
               style=p.find('w:pPr/w:pStyle',ns)
               sid=style.get('{'+ns['w']+'}val','') if style is not None else ''
-              if text.strip() in ['摘　要','摘 要','摘要','Abstract','ABSTRACT','参考文献'] or (len(text)<85 and (sid.startswith('Heading') or '章' in text[:6] or text[:1].isdigit())) or text.startswith('[17]'):
-                  print('STRUCT',i,sid, text[:75])
-              elif any(k in text for k in ['创新','本文的贡献','AutoProbe','本文提出','首次','future work','In this','This thesis']):
-                  print('MATCH',i,sid,len(text),[k for k in ['创新','本文的贡献','AutoProbe','本文提出','首次','future work','In this','This thesis'] if k in text])
+              if i in range(67,80) or i in [236,237,240,241,243,244,245,246,511,512,513,596,597,598,599,602,603,604,605,606,607] or 78<i<83:
+                  print('META',i,sid,len(text),[a.tag.split('}')[-1] for a in p], 'fields',len(p.findall('.//w:fldChar',ns)),'runs',[(len(r.findall('w:t',ns)),len(''.join(t.text or '' for t in r.findall('w:t',ns)))) for r in p.findall('w:r',ns)][:12])
