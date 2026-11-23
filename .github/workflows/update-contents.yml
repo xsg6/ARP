@@ -1,0 +1,91 @@
+name: Update thesis contents
+on:
+  push:
+    branches: [thesis-evidence]
+    paths: ['.github/workflows/update-contents.yml']
+permissions:
+  contents: write
+jobs:
+  revision:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install typesetting tools
+        run: |
+          python -m pip install lxml pymupdf
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y -qq libreoffice-writer fonts-noto-cjk
+      - name: Update headings and verify the contents against the PDF
+        shell: python
+        run: |
+          from pathlib import Path
+          from copy import deepcopy
+          from lxml import etree as E
+          import fitz,re,tempfile,zipfile,subprocess
+          D=next(Path("毕业论文").glob("毕业论文初稿*.docx"))
+          W="{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+          with zipfile.ZipFile(D) as z: parts={n:z.read(n) for n in z.namelist()}
+          root=E.fromstring(parts["word/document.xml"]);body=root.find(W+"body")
+          def ts(p):return list(p.iter(W+"t"))
+          def text(p):return "".join(t.text or "" for t in ts(p))
+          def style(p):
+              s=p.find(W+"pPr/"+W+"pStyle")
+              return "" if s is None else s.get(W+"val","")
+          def compact(s):return re.sub(r"\s+","",s)
+          def entries():
+              return [p for p in body.findall(W+"p") if len(ts(p))>=2 and (ts(p)[-1].text or "").isdigit() and any(True for _ in p.iter(W+"tab"))]
+          def label(p):return "".join(t.text or "" for t in ts(p)[:-1])
+          def settitle(p,title,cache=False):
+              nodes=ts(p)[:-1] if cache else ts(p)
+              nodes[0].text=title
+              for t in nodes[1:]:t.text=""
+          def clone(p):
+              q=deepcopy(p)
+              for name in ["bookmarkStart","bookmarkEnd"]:
+                  for elem in q.iter(W+name):elem.getparent().remove(elem)
+              return q
+          def num(p):return re.match(r"[1-7](?:\.\d+)+",text(p)).group()
+          ps=body.findall(W+"p")
+          h={num(p):p for p in ps if style(p) in ("Heading2","Heading3") and re.match(r"[1-7]\.",text(p))}
+          en={compact(label(p)):p for p in entries()}
+          toc={k:en[compact(text(p))] for k,p in h.items()}
+          bodytext=compact(text(h["1.1"].getnext()))[:28]
+          count=lambda:[sum(style(p)==s and re.match(r"[1-7]\.",text(p)) is not None for p in body.findall(W+"p")) for s in ("Heading2","Heading3")]
+          before=count()
+          titles={"多源表征融合与排序模型训练":"修复差异与多前缀表征的融合排序","成本感知补丁验证的对照实验设计":"不确定性与验证成本联合调度的实验设计","预算设置与调度策略对照":"相同时间预算下分歧奖励的对照设计"}
+          for old,new in titles.items():
+              found=[p for p in ps if style(p).startswith("Heading") and text(p).endswith(old)]
+              assert len(found)==1
+              p=found[0]; e=en[compact(text(p))]; title=text(p)[:-len(old)]+new
+              settitle(p,title);settitle(e,title,True)
+          after=count();assert before==after
+          def save():
+              parts["word/document.xml"]=E.tostring(root,encoding="utf-8",xml_declaration=True,standalone=True)
+              with zipfile.ZipFile(D,"w",zipfile.ZIP_DEFLATED) as z:
+                  for k,v in parts.items():z.writestr(k,v)
+          def render():
+              with tempfile.TemporaryDirectory() as t:
+                  subprocess.run(["libreoffice","-env:UserInstallation=file://"+t+"/profile","--headless","--convert-to","pdf","--outdir",t,str(D)],check=True)
+                  D.with_suffix(".pdf").write_bytes((Path(t)/(D.stem+".pdf")).read_bytes())
+              with fitz.open(D.with_suffix(".pdf")) as pdf:return [compact(p.get_text()) for p in pdf]
+          for iteration in range(5):
+              save();pages=render()
+              start=next(i for i,p in enumerate(pages) if bodytext in p)
+              changed=0
+              for p in entries():
+                  key=compact(label(p));t=ts(p)[-1];old=int(t.text)
+                  hits=[j-start+1 for j in range(start,len(pages)) if key in pages[j]]
+                  if not hits:raise ValueError("missing contents match: "+key)
+                  new=min(hits,key=lambda j:abs(j-old));changed+=new!=old;t.text=str(new)
+              if not changed:break
+          else:raise RuntimeError("page fields unstable")
+          assert all(len(p)>12 for p in pages)
+          headings=[compact(text(p)) for p in body.findall(W+"p") if style(p) in ("Heading2","Heading3") and re.match(r"[1-7]\.",text(p))]
+          toclabels=[compact(label(p)) for p in entries() if re.match(r"[1-7]\.",label(p))]
+          assert headings==toclabels and len(headings)==len(set(headings))
+          print("FINAL",before,after,len(pages),len(entries()))
+      - name: Commit formatted draft
+        run: |
+          git add -- 毕业论文/*.docx 毕业论文/*.pdf
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Align thesis contents and experimental sections with both research questions'
+          git push origin HEAD:thesis-evidence
