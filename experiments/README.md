@@ -95,3 +95,20 @@ check_pipeline.py 仅用合成数组验证指标分母、预算边界、错误�
 4. RQ5。injection.py 从训练集已标注正确的补丁形成全局语义原型，训练投影与门控后在冻结解码器输出层之前注入。原文未公布注入训练细节，本实现选择正确目标的 teacher-forced token 损失、128 维原型空间。先运行 python injection.py train adjudicated.jsonl cache.npz adapter.pt --revision "$GENERATOR_SHA"，再用相同解码参数和 50 次采样分别运行 prepare.py generate，有注入组增加 --adapter adapter.pt。两组均独立验证和标注，保留每个去重补丁的 draw_count，再运行 python injection.py compare baseline_labeled.jsonl injected_labeled.jsonl bugs.jsonl rq5.json --draws 50。只有确认每个缺陷都完成规定次数的采样时才能使用该分母。RQ5 候选池与 RQ1–RQ4 不混用。
 
 正式运行可加 --select-fixed，在开发缺陷中搜索达到至少 95% 条件保留率且实测验证费用最低的 K 与阈值，二者记入 settings.json。fixed_k_cost.csv 汇总各分支耗时与相对穷举节省。auc_ci.csv 为逐缺陷重采样区间。缓存旁的 .json 记录各骨干前向耗时、特征字节数及 GPU 峰值分配量。论文未提供原始训练集、外部标注及精确运行设置，这些代码不能逐位复现历史表格。check_models.py 使用随机初始化的小模型检查实际库调用、特征维度与可训练注入路径。
+
+## 第三至第五章的扩展实验
+
+准备逐候选记录、十个位置的冻结表征缓存和完整的缺陷清单后，可在已有工作流上开启扩展实验。
+
+```bash
+cd experiments
+python run.py --config run_config.json study adjudicated.jsonl cache.npz results_extended --roster bugs.jsonl --extended-studies
+```
+
+| 研究问题 | 可核对的输出 |
+|---|---|
+| 前缀采样密度与排名 | `rank_by_bug.csv`、`rank_repairable.csv` 和 `paired.csv` 中的 `last`、`prefix_3`、`prefix_5`、`fusion` 分别使用 1、3、5、10 个相对位置。3 个位置为 20%、60%、100%，5 个位置为 20%、40%、60%、80%、100%。在同一缓存上重新训练对应的评分头，共用划分和随机种子。配对输出给出完整模型相对各变体的差值。各密度共用的提取耗时只适用于缓存回放，首次准备的实际用时须另行测量。 |
+| 预计耗时对验证决策的贡献 | `cost_errors_by_project.csv` 比较使用训练候选记录耗时中位数的常数预测与原耗时回归模型。已知完成记录给出 MAE 和中位绝对误差，超时记录给出低估误差的下界，缺少完成状态的记录单列。两种估计均保留预算可行性判断与基于已完成耗时的在线修正。 |
+| 表征与分歧奖励的交互 | `validation_studies_by_bug.csv` 保存逐缺陷验证序列与返回标识。`validation_studies.csv` 给出各组的正确返回数及失败原因计数。`validation_contrasts.csv` 在同一预算、返回规则和缺陷清单上计算加奖励前后的差值，以及多前缀与末位置之间的差值之差。差值和 95% 区间均以百分点表示。 |
+
+交互比较的四组共用耗时回归模型。预算内择优返回时，各组使用同一冻结多前缀选择器。回放统一计入缓存所记的特征准备时间。各预算单列，缺陷为配对重采样单位，重复 2,000 次。若校准器或耗时模型使用了目标项目的数据，相关结果不能作为独立项目测试。合成自检仅核查数据流、分母和四组差值计算。

@@ -15,6 +15,10 @@ from sklearn.preprocessing import StandardScaler
 from model import Ranker
 
 
+# Indices into the shared cache at 10%, 20%, ..., 100% of the patch.
+PREFIX_STATES = {"prefix_3": slice(1, 10, 4), "prefix_5": slice(1, 10, 2)}
+
+
 def load(manifest, cache):
     rows = pd.read_json(manifest, lines=True, dtype={"id": str, "bug": str, "project": str})
     rows = rows.reset_index(drop=True)
@@ -47,6 +51,8 @@ def families(rows, x, h, args):
     cal = rows.split.eq("cal").to_numpy()
     out = {}
     modes=["diff","probe","last","mean","fusion","no_rank"]
+    if getattr(args, "extended_studies", False):
+        modes.extend(PREFIX_STATES)
     cache=np.load(args.cache,allow_pickle=False)
     if args.backend=="paper":
         from scorer import train_head
@@ -54,17 +60,20 @@ def families(rows, x, h, args):
         if "tiny" in cache:
             modes.append("tiny")
     for mode in modes:
+        hidden = h[:, PREFIX_STATES[mode], :] if mode in PREFIX_STATES else h
+        score_mode = "fusion" if mode in PREFIX_STATES else mode
+        if mode == "tiny":
+            hidden = cache["tiny"]
         heads = []
         for seed in args.seeds:
             if args.backend=="paper":
-                hidden=cache["tiny"] if mode=="tiny" else h
                 dims=[hidden.shape[-1]] if mode=="tiny" else list(cache["widths"].astype(int))
-                heads.append(train_head(mode,seed,rows,x,hidden,train,cal,dims,args))
+                heads.append(train_head(score_mode,seed,rows,x,hidden,train,cal,dims,args))
                 continue
-            model = Ranker("fusion" if mode == "no_rank" else mode, seed,
+            model = Ranker("fusion" if mode == "no_rank" else score_mode, seed,
                            rank_weight=0 if mode == "no_rank" else 1)
-            model.fit(x[train], h[train], rows.correct.to_numpy(int)[train], rows.group.to_numpy()[train])
-            heads.append(model.logits(x, h))
+            model.fit(x[train], hidden[train], rows.correct.to_numpy(int)[train], rows.group.to_numpy()[train])
+            heads.append(model.logits(x, hidden))
         raw = np.array(heads)
         mean = raw.mean(0)
         scaler = LogisticRegression(C=1.0).fit(mean[cal,None], rows.correct[cal])
@@ -90,6 +99,7 @@ def cost_features(rows):
 
 def replay(g, policy, budget, rule, args):
     p = g.p.to_numpy()
+    return_scores = g.return_p.to_numpy() if "return_p" in g else p
     u = g.u.to_numpy()
     cost = g.cost.to_numpy()
     actual = g.seconds.to_numpy()
@@ -135,13 +145,13 @@ def replay(g, policy, budget, rule, args):
         left[i] = False
         remaining = budget-elapsed
         if actual[i] > remaining:
-            return finish(g, chosen, rule, budget, correct, passed, p, i)
+            return finish(g, chosen, rule, budget, correct, passed, return_scores, i)
         elapsed += actual[i]
         chosen.append(i)
         scale = (1 + actual[chosen].sum()) / (1 + cost[chosen].sum())
         if rule == "first" and passed[i]:
             break
-    return finish(g, chosen, rule, min(elapsed,budget), correct, passed, p, None)
+    return finish(g, chosen, rule, min(elapsed,budget), correct, passed, return_scores, None)
 
 
 def finish(g, chosen, rule, seconds, correct, passed, p, interrupted):
@@ -330,6 +340,9 @@ def assess(rows,x,h,overhead,args):
                 returned_id="",interrupted_id=""))
     logs=pd.DataFrame(decisions)
     logs.to_csv(out/"schedule_by_bug.csv",index=False)
+    if getattr(args, "extended_studies", False):
+        from validation_studies import write_studies
+        write_studies(test, logs, scores["last"], train.seconds.median(), replay, args)
     summary=logs.groupby(["policy","budget","rule"]).agg(
         bugs=("group","size"), repaired=("success","sum"), returned=("returned","sum"),
         retained=("retained","sum"), repairable=("repairable","sum"), attempts=("attempts","sum"),
@@ -344,7 +357,10 @@ def assess(rows,x,h,overhead,args):
     cis=[]
     for metric in ["mrr","top1","top5"]:
         wide=rank.pivot(index="group",columns="method",values=metric)
-        for baseline in ["probe","last","diff","mean","no_rank","generation"]:
+        baselines = ["probe","last","diff","mean","no_rank","generation"]
+        if getattr(args, "extended_studies", False):
+            baselines.extend(PREFIX_STATES)
+        for baseline in baselines:
             cis.append(dict(metric=metric,**paired(wide,"fusion",baseline,rng)))
     for (budget,rule),g in logs[logs.policy!="exhaustive"].groupby(["budget","rule"]):
         for metric in ["success","retained"]:
@@ -376,6 +392,8 @@ if __name__=="__main__":
     ap.add_argument("--train-on",choices=["all","plausible"],default="plausible")
     ap.add_argument("--select-fixed",action="store_true",help="select K and threshold on cal to retain at least 95%%")
     ap.add_argument("--skip-auc-ci",action="store_true",help="omit expensive cluster bootstrap for development runs")
+    ap.add_argument("--extended-studies", action="store_true",
+                    help="evaluate prefix counts, cost prediction and representation-by-reward interactions")
     ap.add_argument("--backend",choices=["paper","linear"],default="paper")
     ap.add_argument("--device",default="cpu")
     ap.add_argument("--epochs",type=int,default=100)
